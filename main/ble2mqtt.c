@@ -435,44 +435,85 @@ static void _ble_on_mqtt_get(const char *topic, const uint8_t *payload,
 static void _ble_on_mqtt_set(const char *topic, const uint8_t *payload,
     size_t len, void *ctx);
 
-static void ble_on_characteristic_found(mac_addr_t mac, ble_uuid_t service_uuid,
-    ble_uuid_t characteristic_uuid, uint8_t properties)
+static bool ble_is_number_of_digitals_descriptor(ble_uuid_t descriptor_uuid){
+    ble_uuid_t uuid_number_of_digitals = { 0xfb , 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x09, 0x29, 0x00, 0x00};
+    return memcmp(descriptor_uuid, uuid_number_of_digitals, 16) == 0;
+}
+
+static void ble_on_automation_io_characteristic_found(ble_device_t *device, ble_service_t *service, ble_characteristic_t *characteristic){
+    ESP_LOGI("AIO", "found automation IO characteristic " UUID_FMT, UUID_PARAM(characteristic->uuid));
+    
+    bool is_output = ((characteristic->properties & CHAR_PROP_WRITE) == CHAR_PROP_WRITE);
+
+    ESP_LOGI("AIO", "is output: %d", is_output);
+
+    ble_descriptor_t *cur;
+
+    for(cur = characteristic->descriptors; cur; cur = cur->next){
+        if(!ble_is_number_of_digitals_descriptor(cur->uuid)){
+            continue;
+        }
+        ESP_LOGI("AIO", "reading digital descriptor: " UUID_FMT, UUID_PARAM(cur->uuid));
+        ESP_LOGI("AIO", "queueing descriptor read 0x%x", cur->handle);
+        ble_descriptor_read(device, characteristic, cur);
+        ESP_LOGI("AIO", "queueing complete");
+        break;
+    }
+
+    // ble_descriptor_read(device->mac, characteristic);
+}
+
+static bool ble_is_automation_io_characteristic(ble_uuid_t service_uuid){
+    ble_uuid_t uuid_automation_io = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x56, 0x2a, 0x00, 0x00 };
+    return memcmp(service_uuid, uuid_automation_io, 16) == 0;
+}
+
+static void ble_on_characteristic_found(ble_device_t *device, ble_service_t *service, ble_characteristic_t *characteristic)
 {
+    ble_uuid_t *service_uuid = &(service->uuid);
+    ble_uuid_t *characteristic_uuid = &(characteristic->uuid);
+    uint8_t properties = characteristic->properties;
+    mac_addr_t *mac = &(device->mac);
     ESP_LOGD(TAG, "Found new characteristic: service: " UUID_FMT
       ", characteristic: " UUID_FMT ", properties: 0x%x",
-      UUID_PARAM(service_uuid), UUID_PARAM(characteristic_uuid), properties);
+      UUID_PARAM(*service_uuid), UUID_PARAM(*characteristic_uuid), properties);
     char *topic;
 
-    if (!config_ble_service_should_include(uuidtoa(service_uuid)) ||
-        !config_ble_characteristic_should_include(uuidtoa(characteristic_uuid)))
+    if (!config_ble_service_should_include(uuidtoa(*service_uuid)) ||
+        !config_ble_characteristic_should_include(uuidtoa(*characteristic_uuid)))
     {
         return;
     }
 
-    topic = ble_topic(mac, service_uuid, characteristic_uuid);
+    if(ble_is_automation_io_characteristic(*characteristic_uuid)){
+        ble_on_automation_io_characteristic_found(device, service, characteristic);
+        return;
+    }
+
+    topic = ble_topic(*mac, *service_uuid, *characteristic_uuid);
 
     /* Characteristic is readable */
     if (properties & CHAR_PROP_READ)
     {
         mqtt_subscribe(ble_topic_suffix(topic, 1), config_mqtt_qos_get(),
-            _ble_on_mqtt_get, ble_ctx_gen(mac, service_uuid,
-            characteristic_uuid), free);
-        ble_characteristic_read(mac, service_uuid, characteristic_uuid);
+            _ble_on_mqtt_get, ble_ctx_gen(*mac, *service_uuid,
+            *characteristic_uuid), free);
+        ble_characteristic_read(*mac, *service_uuid, *characteristic_uuid);
     }
 
     /* Characteristic is writable */
     if (properties & (CHAR_PROP_WRITE | CHAR_PROP_WRITE_NR))
     {
         mqtt_subscribe(ble_topic_suffix(topic, 0), config_mqtt_qos_get(),
-            _ble_on_mqtt_set, ble_ctx_gen(mac, service_uuid,
-            characteristic_uuid), free);
+            _ble_on_mqtt_set, ble_ctx_gen(*mac, *service_uuid,
+            *characteristic_uuid), free);
     }
 
     /* Characteristic can notify / indicate on changes */
     if (properties & (CHAR_PROP_NOTIFY | CHAR_PROP_INDICATE))
     {
-        ble_characteristic_notify_register(mac, service_uuid,
-            characteristic_uuid);
+        ble_characteristic_notify_register(*mac, *service_uuid,
+            *characteristic_uuid);
     }
 }
 

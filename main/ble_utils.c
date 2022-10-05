@@ -853,6 +853,23 @@ void ble_device_services_free(ble_service_t **list)
     *head = NULL;
 }
 
+ble_descriptor_t *ble_device_descriptor_add(ble_characteristic_t *characteristic,
+    ble_uuid_t uuid, uint16_t handle, uint8_t properties)
+{
+    ble_descriptor_t *descriptor, **cur;
+
+    descriptor = malloc(sizeof(ble_descriptor_t));
+    descriptor->next = NULL;
+    memcpy(descriptor->uuid, uuid, sizeof(ble_uuid_t));
+    descriptor->handle = handle;
+    descriptor->properties = properties;
+
+    for (cur = &characteristic->descriptors; *cur; cur = &(*cur)->next);
+    *cur = descriptor;
+
+    return descriptor;
+}
+
 ble_characteristic_t *ble_device_characteristic_add(ble_service_t *service,
     ble_uuid_t uuid, uint16_t handle, uint8_t properties)
 {
@@ -864,6 +881,7 @@ ble_characteristic_t *ble_device_characteristic_add(ble_service_t *service,
     characteristic->handle = handle;
     characteristic->properties = properties;
     characteristic->client_config_handle = 0;
+    characteristic->descriptors = NULL;
 
     for (cur = &service->characteristics; *cur; cur = &(*cur)->next);
     *cur = characteristic;
@@ -899,8 +917,40 @@ ble_characteristic_t *ble_device_characteristic_find_by_handle(
     return cur;
 }
 
+ble_descriptor_t *ble_device_descriptor_find_by_handle(ble_characteristic_t *characteristic, uint16_t handle)
+{
+    ble_descriptor_t *cur;
+
+    for (cur = characteristic->descriptors; cur; cur = cur->next)
+    {
+        if (cur->handle == handle)
+            break;
+    }
+
+    return cur;
+}
+
+void ble_device_descriptor_free(ble_descriptor_t *descriptor)
+{
+    free(descriptor);
+}
+
+void ble_device_descriptors_free(ble_descriptor_t **list)
+{
+    ble_descriptor_t *cur, **head = list;
+
+    while (*list)
+    {
+        cur = *list;
+        *list = cur->next;
+        ble_device_descriptor_free(cur);
+    }
+    *head = NULL;
+}
+
 void ble_device_characteristic_free(ble_characteristic_t *characteristic)
 {
+    ble_device_descriptors_free(&characteristic->descriptors);
     free(characteristic);
 }
 

@@ -45,7 +45,8 @@ typedef enum {
     BLE_OPERATION_TYPE_READ,
     BLE_OPERATION_TYPE_WRITE,
     BLE_OPERATION_TYPE_WRITE_NR,
-    BLE_OPERATION_TYPE_WRITE_CHAR,
+    BLE_OPERATION_TYPE_READ_DESC,
+    BLE_OPERATION_TYPE_WRITE_DESC,
 } ble_operation_type_t;
 
 typedef struct ble_operation_t {
@@ -178,7 +179,12 @@ static inline void ble_operation_perform(ble_operation_t *operation)
             operation->characteristic->handle, operation->len, operation->value,
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         break;
-    case BLE_OPERATION_TYPE_WRITE_CHAR:
+    case BLE_OPERATION_TYPE_READ_DESC:
+        uint16_t handle = *((uint16_t*)operation->value);
+        esp_ble_gattc_read_char_descr(g_gattc_if, operation->device->conn_id,
+            handle, ESP_GATT_AUTH_REQ_NONE);
+        break;
+    case BLE_OPERATION_TYPE_WRITE_DESC:
         esp_ble_gattc_write_char_descr(g_gattc_if, operation->device->conn_id,
             operation->characteristic->client_config_handle, operation->len,
             operation->value,
@@ -202,7 +208,7 @@ static void ble_operation_dequeue(ble_operation_t **queue)
         operation->value);
     ble_operation_perform(operation);
 
-    if (operation->type == BLE_OPERATION_TYPE_WRITE_CHAR)
+    if (operation->type == BLE_OPERATION_TYPE_WRITE_DESC)
         ble_operation_dequeue(queue);
 
     if (operation->len)
@@ -390,7 +396,7 @@ static void ble_update_cache(ble_device_t *dev)
     esp_gattc_db_elem_t *db;
     ble_service_t *service = NULL;
     ble_characteristic_t *characteristic = NULL;
-    ble_uuid_t service_uuid, characteristic_uuid;
+    ble_uuid_t service_uuid, characteristic_uuid, descriptor_uuid;
     uint16_t count, i;
 
     if (!dev)
@@ -426,11 +432,15 @@ static void ble_update_cache(ble_device_t *dev)
             characteristic = ble_device_characteristic_add(service,
                 characteristic_uuid, db[i].attribute_handle, db[i].properties);
         }
-        else if (db[i].type == ESP_GATT_DB_DESCRIPTOR &&
-            db[i].uuid.len == ESP_UUID_LEN_16 &&
-            db[i].uuid.uuid.uuid16 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG)
+        else if (db[i].type == ESP_GATT_DB_DESCRIPTOR)
         {
-            characteristic->client_config_handle = db[i].attribute_handle;
+            if(db[i].uuid.uuid.uuid16 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG
+                && db[i].uuid.len == ESP_UUID_LEN_16){
+                characteristic->client_config_handle = db[i].attribute_handle;
+            }
+
+            esp_uuid_to_bt_uuid(db[i].uuid, descriptor_uuid);
+            ble_device_descriptor_add(characteristic, descriptor_uuid, db[i].attribute_handle, db[i].properties);
         }
     }
     free(db);
@@ -460,12 +470,25 @@ int ble_foreach_characteristic(mac_addr_t mac,
         for (characteristic = service->characteristics; characteristic;
             characteristic = characteristic->next)
         {
-            cb(mac, service->uuid, characteristic->uuid,
-                characteristic->properties);
+            cb(dev, service, characteristic);
         }
     }
 
     xSemaphoreGiveRecursive(devices_list_semaphore);
+    return 0;
+}
+
+int ble_descriptor_read(ble_device_t *device, ble_characteristic_t *characteristic, ble_descriptor_t *descriptor)
+{
+    if (!(descriptor->properties & CHAR_PROP_READ)){
+        ESP_LOGE(TAG, "properties no read");
+        // return -1;
+    }
+
+    ESP_LOGI(TAG, "queueing...");
+    ble_operation_enqueue(&operation_queue, BLE_OPERATION_TYPE_READ_DESC, device,
+        characteristic, 2, (uint8_t*)&(descriptor->handle));
+
     return 0;
 }
 
@@ -579,7 +602,7 @@ int ble_characteristic_notify_register(mac_addr_t mac, ble_uuid_t service_uuid,
         goto Exit;
     }
 
-    ble_operation_enqueue(&operation_queue, BLE_OPERATION_TYPE_WRITE_CHAR,
+    ble_operation_enqueue(&operation_queue, BLE_OPERATION_TYPE_WRITE_DESC,
         device, characteristic, sizeof(enable), (uint8_t *)&enable);
 
     ret = 0;
@@ -952,6 +975,15 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
             ESP_LOGE(TAG, "Failed writing characteristic, status = 0x%x",
                 param->write.status);
         }
+        break;
+    case ESP_GATTC_READ_DESCR_EVT:
+        if (param->read.status != ESP_GATT_OK)
+        {
+            ESP_LOGE(TAG,
+                "Failed reading characteristic descriptor, status = 0x%x",
+                param->read.status);
+        }
+        ESP_LOGI(TAG, "descr read evt");
         break;
     case ESP_GATTC_WRITE_DESCR_EVT:
         if (param->write.status != ESP_GATT_OK)

@@ -20,12 +20,20 @@
 typedef uint8_t mac_addr_t[6];
 typedef uint8_t ble_uuid_t[16];
 
+typedef struct ble_descriptor_t {
+    struct ble_descriptor_t *next;
+    ble_uuid_t uuid;
+    uint16_t handle;
+    uint8_t properties;
+} ble_descriptor_t;
+
 typedef struct ble_characteristic_t {
     struct ble_characteristic_t *next;
     ble_uuid_t uuid;
     uint16_t handle;
     uint8_t properties;
     uint16_t client_config_handle;
+    ble_descriptor_t *descriptors;
 } ble_characteristic_t;
 
 typedef struct ble_service_t {
@@ -89,6 +97,11 @@ ble_characteristic_t *ble_device_characteristic_find_by_handle(
     ble_service_t *service, uint16_t handle);
 void ble_device_characteristic_free(ble_characteristic_t *characteristic);
 void ble_device_characteristics_free(ble_characteristic_t **list);
+
+ble_descriptor_t *ble_device_descriptor_add(ble_characteristic_t *characteristic,
+    ble_uuid_t uuid, uint16_t handle, uint8_t properties);
+ble_descriptor_t *ble_device_descriptor_find_by_handle(
+    ble_characteristic_t *characteristicer4, uint16_t handle);
 
 int ble_device_info_get_by_conn_id_handle(ble_device_t *list, uint16_t conn_id,
     uint16_t handle, ble_device_t **device, ble_service_t **service,
