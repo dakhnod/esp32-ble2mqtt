@@ -534,6 +534,26 @@ static void ble_on_device_services_discovered(mac_addr_t mac)
     ble_foreach_characteristic(mac, ble_on_characteristic_found);
 }
 
+static void ble_automation_io_publish_pin_state(ble_device_t *device, uint32_t pin_number, bool is_output, char *state){
+    char node_name[20];
+    if(is_output){
+        snprintf(node_name, 20, "DigitalOutput%d", pin_number);
+    }else{
+        snprintf(node_name, 20, "DigitalInput%d", pin_number);
+    }
+
+    ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
+
+    char *topic = ble_topic_raw_characteristic_name(device->mac, aio_service_uuid, node_name);
+    mqtt_publish(
+        topic, 
+        (uint8_t*) state, 
+        strlen(state), 
+        config_mqtt_qos_get(),
+        config_mqtt_retained_get()
+    );
+}
+
 static void ble_on_automation_io_characteristic_change(ble_device_t *device, uint16_t handle, uint8_t *value, size_t value_len){
     ESP_LOGI("AIO", "AIO notification");
 
@@ -545,22 +565,14 @@ static void ble_on_automation_io_characteristic_change(ble_device_t *device, uin
         char node_name[16];
         snprintf(node_name, 16, "DigitalInput%d", current_pin);
 
-        char payload[] = "unknown";
+        char state[] = "unknown";
         if(pin_bits == 0b00){
-            strcpy(payload, "off");
+            strcpy(state, "off");
         }else if(pin_bits == 0b01){
-            strcpy(payload, "on");
+            strcpy(state, "on");
         }
 
-        ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
-        char *topic = ble_topic_raw_characteristic_name(device->mac, aio_service_uuid, node_name);
-        mqtt_publish(
-            topic, 
-            (uint8_t*) payload, 
-            strlen(payload), 
-            config_mqtt_qos_get(),
-            config_mqtt_retained_get()
-        );
+        ble_automation_io_publish_pin_state(device, current_pin, true, state);
     }
 }
 
@@ -583,26 +595,6 @@ static void ble_on_device_characteristic_value(mac_addr_t mac,
         config_mqtt_retained_get());
 }
 
-static void ble_automation_io_publish_pin_state(ble_device_t *device, uint32_t pin_number, bool is_output, char *state){
-    char node_name[20];
-    if(is_output){
-        snprintf(node_name, 20, "DigitalOutput%d", pin_number);
-    }else{
-        snprintf(node_name, 20, "DigitalInput%d", pin_number);
-    }
-
-    ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
-
-    char *topic = ble_topic_raw_characteristic_name(device->mac, aio_service_uuid, node_name);
-    mqtt_publish(
-        topic, 
-        (uint8_t*) state 
-        strlen(state), 
-        config_mqtt_qos_get(),
-        config_mqtt_retained_get()
-    );
-}
-
 static void ble_on_device_descriptor_value(
     mac_addr_t mac,
     uint16_t handle,
@@ -619,6 +611,7 @@ static void ble_on_device_descriptor_value(
             for(uint32_t i = 0; i < input_count; i++){
             }
             */
+            ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
             ble_service_t *service = ble_device_service_find(device, aio_service_uuid);
             ble_characteristic_read_by_handle(device, service, device->automation_io.input_characteristic_handle);
         }else if(handle == device->automation_io.output_descriptor_handle){
