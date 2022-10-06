@@ -75,6 +75,8 @@ static ble_on_device_services_discovered_cb_t
     on_device_services_discovered_cb = NULL;
 static ble_on_device_characteristic_value_cb_t
     on_device_characteristic_value_cb = NULL;
+static ble_on_device_descriptor_value_cb_t
+    on_device_descriptor_value_cb = NULL;
 static ble_on_passkey_requested_cb_t on_passkey_requested_cb = NULL;
 
 void ble_set_on_broadcaster_discovered_cb(ble_on_broadcaster_discovered_cb_t cb)
@@ -109,9 +111,19 @@ void ble_set_on_device_characteristic_value_cb(
     on_device_characteristic_value_cb = cb;
 }
 
+void ble_set_on_device_descriptor_value_cb(
+    ble_on_device_descriptor_value_cb_t cb)
+{
+    on_device_descriptor_value_cb = cb;
+}
+
 void ble_set_on_passkey_requested_cb(ble_on_passkey_requested_cb_t cb)
 {
     on_passkey_requested_cb = cb;
+}
+
+ble_device_t *ble_get_device_list(){
+    return devices_list;
 }
 
 /* BLE Queue */
@@ -180,9 +192,8 @@ static inline void ble_operation_perform(ble_operation_t *operation)
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         break;
     case BLE_OPERATION_TYPE_READ_DESC:
-        uint16_t handle = *((uint16_t*)operation->value);
         esp_ble_gattc_read_char_descr(g_gattc_if, operation->device->conn_id,
-            handle, ESP_GATT_AUTH_REQ_NONE);
+            *((uint16_t*)operation->value), ESP_GATT_AUTH_REQ_NONE);
         break;
     case BLE_OPERATION_TYPE_WRITE_DESC:
         esp_ble_gattc_write_char_descr(g_gattc_if, operation->device->conn_id,
@@ -526,6 +537,25 @@ Exit:
     return ret;
 }
 
+int ble_characteristic_read_by_handle(ble_device_t *device, ble_service_t *service, uint16_t characteristic_handle)
+{
+    ble_characteristic_t *characteristic;
+
+    if (!(characteristic = ble_device_characteristic_find_by_handle(service,
+        characteristic_handle)))
+    {
+        return -1;
+    }
+
+    if (!(characteristic->properties & CHAR_PROP_READ))
+        return -1;
+
+    ble_operation_enqueue(&operation_queue, BLE_OPERATION_TYPE_READ, device,
+        characteristic, 0, NULL);
+
+    return 0;
+}
+
 int ble_characteristic_write(mac_addr_t mac, ble_uuid_t service_uuid,
     ble_uuid_t characteristic_uuid, const uint8_t *value, size_t value_len)
 {
@@ -562,34 +592,15 @@ Exit:
     return ret;
 }
 
-int ble_characteristic_notify_register(mac_addr_t mac, ble_uuid_t service_uuid,
-    ble_uuid_t characteristic_uuid)
+int ble_characteristic_notify_register(ble_device_t *device, ble_service_t *service, ble_characteristic_t *characteristic)
 {
     uint16_t enable = htole16(0x1);
-    ble_device_t *device;
-    ble_service_t *service;
-    ble_characteristic_t *characteristic;
-    int ret = -1;
-
-    xSemaphoreTakeRecursive(devices_list_semaphore, portMAX_DELAY);
-
-    if (!(device = ble_device_find_by_mac(devices_list, mac)))
-        goto Exit;
-
-    if (!(service = ble_device_service_find(device, service_uuid)))
-        goto Exit;
-
-    if (!(characteristic = ble_device_characteristic_find_by_uuid(service,
-        characteristic_uuid)))
-    {
-        goto Exit;
-    }
 
     if (!(characteristic->properties & (CHAR_PROP_NOTIFY | CHAR_PROP_INDICATE)))
-        goto Exit;
+        return -1;
 
     if (characteristic->client_config_handle == 0)
-        goto Exit;
+        return -1;
 
     if (characteristic->properties & CHAR_PROP_INDICATE)
         enable = htole16(0x2);
@@ -598,17 +609,14 @@ int ble_characteristic_notify_register(mac_addr_t mac, ble_uuid_t service_uuid,
         characteristic->handle))
     {
         ESP_LOGE(TAG, "Failed registring for notification for char " UUID_FMT,
-            UUID_PARAM(characteristic_uuid));
-        goto Exit;
+            UUID_PARAM(characteristic->uuid));
+        return -1;
     }
 
     ble_operation_enqueue(&operation_queue, BLE_OPERATION_TYPE_WRITE_DESC,
         device, characteristic, sizeof(enable), (uint8_t *)&enable);
 
-    ret = 0;
-Exit:
-    xSemaphoreGiveRecursive(devices_list_semaphore);
-    return ret;
+    return 0;
 }
 
 int ble_characteristic_notify_unregister(mac_addr_t mac,
@@ -959,10 +967,10 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         }
         else if (!ble_device_info_get_by_conn_id_handle(devices_list,
             param->read.conn_id, param->read.handle, &device, &service,
-            &characteristic) && on_device_characteristic_value_cb)
+            &characteristic, NULL) && on_device_characteristic_value_cb)
         {
             on_device_characteristic_value_cb(device->mac, service->uuid,
-                characteristic->uuid, param->read.value, param->read.value_len);
+                characteristic->uuid, characteristic->handle, param->read.value, param->read.value_len);
         }
 
         xSemaphoreGiveRecursive(devices_list_semaphore);
@@ -977,14 +985,63 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         }
         break;
     case ESP_GATTC_READ_DESCR_EVT:
+    {
+        ble_device_t *device;
+        ble_service_t *service;
+        ble_characteristic_t *characteristic;
+        ble_descriptor_t *descriptor;
+
+        need_dequeue = 1;
+
+        xSemaphoreTakeRecursive(devices_list_semaphore, portMAX_DELAY);
+
+        if (!(device = ble_device_find_by_conn_id(devices_list,
+            param->read.conn_id)))
+        {
+            xSemaphoreGiveRecursive(devices_list_semaphore);
+            break;
+        }
+
         if (param->read.status != ESP_GATT_OK)
         {
-            ESP_LOGE(TAG,
-                "Failed reading characteristic descriptor, status = 0x%x",
-                param->read.status);
+            /* Check if authentication/encryption is needed */
+            if (param->read.status == ESP_GATT_INSUF_AUTHENTICATION ||
+                param->read.status == ESP_GATT_INSUF_ENCRYPTION)
+            {
+                if (!device->is_authenticating)
+                {
+                    device->is_authenticating = 1;
+                    esp_ble_set_encryption(device->mac,
+                        ESP_BLE_SEC_ENCRYPT_MITM);
+                }
+                /* Try again */
+                esp_ble_gattc_read_char_descr(g_gattc_if, param->read.conn_id,
+                        param->read.handle, ESP_GATT_AUTH_REQ_NONE);
+                need_dequeue = 0;
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed reading descriptor, status = 0x%x",
+                        param->read.status);
+            }
         }
-        ESP_LOGI(TAG, "descr read evt");
+        else if (!ble_device_info_get_by_conn_id_handle(devices_list,
+            param->read.conn_id, param->read.handle, &device, &service,
+            &characteristic, &descriptor) && on_device_descriptor_value_cb)
+        {
+            on_device_descriptor_value_cb(
+                device, 
+                service,
+                characteristic, 
+                descriptor, 
+                param->read.value, 
+                param->read.value_len
+            );
+        }
+
+        xSemaphoreGiveRecursive(devices_list_semaphore);
         break;
+    }
     case ESP_GATTC_WRITE_DESCR_EVT:
         if (param->write.status != ESP_GATT_OK)
         {
@@ -1010,10 +1067,10 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
 
         if (!ble_device_info_get_by_conn_id_handle(devices_list,
             param->notify.conn_id, param->notify.handle, &device, &service,
-            &characteristic) && on_device_characteristic_value_cb)
+            &characteristic, NULL) && on_device_characteristic_value_cb)
         {
             on_device_characteristic_value_cb(device->mac, service->uuid,
-                characteristic->uuid, param->notify.value,
+                characteristic->uuid, param->notify.handle, param->notify.value,
                 param->notify.value_len);
         }
 

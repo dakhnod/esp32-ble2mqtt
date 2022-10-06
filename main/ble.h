@@ -33,8 +33,16 @@ typedef void (*ble_on_device_services_discovered_cb_t)(mac_addr_t mac);
 typedef void (*ble_on_device_characteristic_found_cb_t)(ble_device_t *device,
     ble_service_t *service, ble_characteristic_t *characteristic);
 typedef void (*ble_on_device_characteristic_value_cb_t)(mac_addr_t mac,
-    ble_uuid_t service, ble_uuid_t characteristic, uint8_t *value,
+    ble_uuid_t service, ble_uuid_t characteristic, uint16_t characteristic_handle, uint8_t *value,
     size_t value_len);
+typedef void (*ble_on_device_descriptor_value_cb_t)(
+    ble_device_t *device, 
+    ble_service_t *service,
+    ble_characteristic_t *characteristic, 
+    ble_descriptor_t *descriptor, 
+    uint8_t *value,
+    size_t value_len
+);
 typedef uint32_t (*ble_on_passkey_requested_cb_t)(mac_addr_t mac);
 
 /* Event handlers */
@@ -47,10 +55,13 @@ void ble_set_on_device_services_discovered_cb(
     ble_on_device_services_discovered_cb_t cb);
 void ble_set_on_device_characteristic_value_cb(
     ble_on_device_characteristic_value_cb_t cb);
+void ble_set_on_device_descriptor_value_cb(ble_on_device_descriptor_value_cb_t);
 void ble_set_on_passkey_requested_cb(ble_on_passkey_requested_cb_t cb);
 
 /* BLE Operations */
 void ble_clear_bonding_info(void);
+
+ble_device_t *ble_get_device_list();
 
 int ble_scan_start(void);
 int ble_scan_stop(void);
@@ -65,10 +76,11 @@ int ble_foreach_characteristic(mac_addr_t mac,
 
 int ble_characteristic_read(mac_addr_t mac, ble_uuid_t service_uuid,
     ble_uuid_t characteristic_uuid);
+int ble_characteristic_read_by_handle(ble_device_t *, ble_service_t *, uint16_t);
 int ble_characteristic_write(mac_addr_t mac, ble_uuid_t service_uuid,
     ble_uuid_t characteristic_uuid, const uint8_t *value, size_t value_len);
-int ble_characteristic_notify_register(mac_addr_t mac, ble_uuid_t service_uuid,
-    ble_uuid_t characteristic_uuid);
+int ble_characteristic_notify_register(ble_device_t *device, ble_service_t *service,
+    ble_characteristic_t *characteristic);
 int ble_characteristic_notify_unregister(mac_addr_t mac,
     ble_uuid_t service_uuid, ble_uuid_t characteristic_uuid);
 

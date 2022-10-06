@@ -681,7 +681,7 @@ ble_device_t *ble_device_add(ble_device_t **list, const char *name,
 {
     ble_device_t *dev, **cur;
 
-    dev = calloc(1, sizeof(*dev));
+    dev = calloc(1, sizeof(ble_device_t));
     dev->name = name ? strdup(name) : NULL;
     memcpy(dev->mac, mac, sizeof(mac_addr_t));
     dev->addr_type = addr_type;
@@ -969,7 +969,7 @@ void ble_device_characteristics_free(ble_characteristic_t **list)
 
 int ble_device_info_get_by_conn_id_handle(ble_device_t *list, uint16_t conn_id,
     uint16_t handle, ble_device_t **device, ble_service_t **service,
-    ble_characteristic_t **characteristic)
+    ble_characteristic_t **characteristic, ble_descriptor_t **descriptor)
 {
     if (!(*device = ble_device_find_by_conn_id(list, conn_id)))
         return -1;
@@ -979,6 +979,14 @@ int ble_device_info_get_by_conn_id_handle(ble_device_t *list, uint16_t conn_id,
         for (*characteristic = (*service)->characteristics; *characteristic;
             *characteristic = (*characteristic)->next)
         {
+            if(descriptor != NULL){
+                for(*descriptor = (*characteristic)->descriptors; *descriptor; *descriptor = (*descriptor)->next){
+                    if((*descriptor)->handle == handle){
+                        return 0;
+                    }
+                }
+            }
+
             if ((*characteristic)->handle == handle)
                 return 0;
         }

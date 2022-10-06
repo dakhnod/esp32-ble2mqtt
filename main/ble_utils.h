@@ -50,6 +50,14 @@ typedef struct ble_device_t {
     uint16_t conn_id;
     ble_service_t *services;
     uint8_t is_authenticating;
+
+    struct {
+        uint16_t input_characteristic_handle, output_characteristic_handle;
+        uint16_t input_descriptor_handle, output_descriptor_handle;
+
+        uint32_t digital_output_count, digital_input_count;
+    } automation_io;
+
 } ble_device_t;
 
 /* Callback functions */
@@ -105,6 +113,6 @@ ble_descriptor_t *ble_device_descriptor_find_by_handle(
 
 int ble_device_info_get_by_conn_id_handle(ble_device_t *list, uint16_t conn_id,
     uint16_t handle, ble_device_t **device, ble_service_t **service,
-    ble_characteristic_t **characteristic);
+    ble_characteristic_t **characteristic, ble_descriptor_t **descriptor);
 
 #endif

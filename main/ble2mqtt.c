@@ -379,8 +379,8 @@ static char *ble_topic_suffix(char *base, uint8_t is_get)
     return topic;
 }
 
-static char *ble_topic(mac_addr_t mac, ble_uuid_t service_uuid,
-    ble_uuid_t characteristic_uuid)
+static char *ble_topic_raw_characteristic_name(mac_addr_t mac, ble_uuid_t service_uuid,
+    const char *characteristic_uuid)
 {
     static char topic[MAX_TOPIC_LEN];
     int i;
@@ -389,9 +389,15 @@ static char *ble_topic(mac_addr_t mac, ble_uuid_t service_uuid,
         config_mqtt_prefix_get(), MAC_PARAM(mac),
         ble_service_name_get(service_uuid));
     snprintf(topic + i, MAX_TOPIC_LEN - i, "/%s",
-        ble_characteristic_name_get(characteristic_uuid));
+        characteristic_uuid);
 
     return topic;
+}
+
+static char *ble_topic(mac_addr_t mac, ble_uuid_t service_uuid,
+    ble_uuid_t characteristic_uuid)
+{
+    return ble_topic_raw_characteristic_name(mac, service_uuid, ble_characteristic_name_get(characteristic_uuid));
 }
 
 static void ble_on_device_disconnected(mac_addr_t mac)
@@ -441,26 +447,32 @@ static bool ble_is_number_of_digitals_descriptor(ble_uuid_t descriptor_uuid){
 }
 
 static void ble_on_automation_io_characteristic_found(ble_device_t *device, ble_service_t *service, ble_characteristic_t *characteristic){
-    ESP_LOGI("AIO", "found automation IO characteristic " UUID_FMT, UUID_PARAM(characteristic->uuid));
-    
     bool is_output = ((characteristic->properties & CHAR_PROP_WRITE) == CHAR_PROP_WRITE);
 
-    ESP_LOGI("AIO", "is output: %d", is_output);
+    if(is_output){
+        device->automation_io.output_characteristic_handle = characteristic->handle;
+    }else{
+        device->automation_io.input_characteristic_handle = characteristic->handle;
 
+        if((characteristic->properties & (CHAR_PROP_INDICATE | CHAR_PROP_NOTIFY)) != 0){
+            uint32_t ret = ble_characteristic_notify_register(device, service, characteristic);
+            ESP_LOGI("AIO", "register for notif: %d", ret);
+        }
+    }
     ble_descriptor_t *cur;
 
     for(cur = characteristic->descriptors; cur; cur = cur->next){
         if(!ble_is_number_of_digitals_descriptor(cur->uuid)){
             continue;
         }
-        ESP_LOGI("AIO", "reading digital descriptor: " UUID_FMT, UUID_PARAM(cur->uuid));
-        ESP_LOGI("AIO", "queueing descriptor read 0x%x", cur->handle);
+        if(is_output){
+            device->automation_io.output_descriptor_handle = cur->handle;
+        }else{
+            device->automation_io.input_descriptor_handle = cur->handle;
+        }
         ble_descriptor_read(device, characteristic, cur);
-        ESP_LOGI("AIO", "queueing complete");
         break;
     }
-
-    // ble_descriptor_read(device->mac, characteristic);
 }
 
 static bool ble_is_automation_io_characteristic(ble_uuid_t service_uuid){
@@ -512,8 +524,7 @@ static void ble_on_characteristic_found(ble_device_t *device, ble_service_t *ser
     /* Characteristic can notify / indicate on changes */
     if (properties & (CHAR_PROP_NOTIFY | CHAR_PROP_INDICATE))
     {
-        ble_characteristic_notify_register(*mac, *service_uuid,
-            *characteristic_uuid);
+        ble_characteristic_notify_register(device, service, characteristic);
     }
 }
 
@@ -523,17 +534,101 @@ static void ble_on_device_services_discovered(mac_addr_t mac)
     ble_foreach_characteristic(mac, ble_on_characteristic_found);
 }
 
+static void ble_on_automation_io_characteristic_change(ble_device_t *device, uint16_t handle, uint8_t *value, size_t value_len){
+    ESP_LOGI("AIO", "AIO notification");
+
+    for(uint32_t current_pin = 0; current_pin < device->automation_io.digital_input_count; current_pin++){
+        uint32_t byte_index = current_pin / 4;
+        uint32_t bit_index = 6 - ((current_pin * 2) % 4);
+        uint8_t pin_bits = (value[byte_index] >> bit_index) & 0b11;
+
+        char node_name[16];
+        snprintf(node_name, 16, "DigitalInput%d", current_pin);
+
+        char payload[] = "unknown";
+        if(pin_bits == 0b00){
+            strcpy(payload, "off");
+        }else if(pin_bits == 0b01){
+            strcpy(payload, "on");
+        }
+
+        ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
+        char *topic = ble_topic_raw_characteristic_name(device->mac, aio_service_uuid, node_name);
+        mqtt_publish(
+            topic, 
+            (uint8_t*) payload, 
+            strlen(payload), 
+            config_mqtt_qos_get(),
+            config_mqtt_retained_get()
+        );
+    }
+}
+
 static void ble_on_device_characteristic_value(mac_addr_t mac,
-    ble_uuid_t service, ble_uuid_t characteristic, uint8_t *value,
+    ble_uuid_t service, ble_uuid_t characteristic, uint16_t characteristic_handle, uint8_t *value,
     size_t value_len)
 {
     char *topic = ble_topic(mac, service, characteristic);
     char *payload = chartoa(characteristic, value, value_len);
     size_t payload_len = strlen(payload);
 
+    if(ble_is_automation_io_characteristic(characteristic)){
+        ble_device_t *device = ble_device_find_by_mac(ble_get_device_list(), mac);
+        ble_on_automation_io_characteristic_change(device, characteristic_handle, value, value_len);
+        return;
+    }
+
     ESP_LOGI(TAG, "Publishing: %s = %s", topic, payload);
     mqtt_publish(topic, (uint8_t *)payload, payload_len, config_mqtt_qos_get(),
         config_mqtt_retained_get());
+}
+
+static void ble_automation_io_publish_pin_state(ble_device_t *device, uint32_t pin_number, bool is_output, char *state){
+    char node_name[20];
+    if(is_output){
+        snprintf(node_name, 20, "DigitalOutput%d", pin_number);
+    }else{
+        snprintf(node_name, 20, "DigitalInput%d", pin_number);
+    }
+
+    ble_uuid_t aio_service_uuid = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x15, 0x18, 0x00, 0x00 };
+
+    char *topic = ble_topic_raw_characteristic_name(device->mac, aio_service_uuid, node_name);
+    mqtt_publish(
+        topic, 
+        (uint8_t*) state 
+        strlen(state), 
+        config_mqtt_qos_get(),
+        config_mqtt_retained_get()
+    );
+}
+
+static void ble_on_device_descriptor_value(
+    mac_addr_t mac,
+    uint16_t handle,
+    uint8_t *value,
+    size_t value_len)
+{
+    ble_device_t *device = ble_device_find_by_mac(ble_get_device_list(), mac);
+
+    if(value_len == 1){
+        if(handle == device->automation_io.input_descriptor_handle){
+            uint32_t input_count = value[0];
+            device->automation_io.digital_input_count = input_count;
+            /*
+            for(uint32_t i = 0; i < input_count; i++){
+            }
+            */
+            ble_service_t *service = ble_device_service_find(device, aio_service_uuid);
+            ble_characteristic_read_by_handle(device, service, device->automation_io.input_characteristic_handle);
+        }else if(handle == device->automation_io.output_descriptor_handle){
+            uint32_t output_count = value[0];
+            device->automation_io.digital_output_count = output_count;
+            for(uint32_t i = 0; i < output_count; i++){
+                ble_automation_io_publish_pin_state(device, i, true, "unknown");
+            }
+        }
+    }
 }
 
 static uint32_t ble_on_passkey_requested(mac_addr_t mac)
@@ -563,6 +658,7 @@ typedef enum {
     EVENT_TYPE_BLE_DEVICE_DISCONNECTED,
     EVENT_TYPE_BLE_DEVICE_SERVICES_DISCOVERED,
     EVENT_TYPE_BLE_DEVICE_CHARACTERISTIC_VALUE,
+    EVENT_TYPE_BLE_DEVICE_DESCRIPTOR_VALUE,
     EVENT_TYPE_BLE_MQTT_CONNECTED,
     EVENT_TYPE_BLE_MQTT_GET,
     EVENT_TYPE_BLE_MQTT_SET,
@@ -605,9 +701,16 @@ typedef struct {
             mac_addr_t mac;
             ble_uuid_t service;
             ble_uuid_t characteristic;
+            uint16_t characteristic_handle;
             uint8_t *value;
             size_t value_len;
         } ble_device_characteristic_value;
+        struct {
+            mac_addr_t mac;
+            uint16_t handle;
+            uint8_t *value;
+            size_t value_len;
+        } ble_device_descriptor_value;
     };
 } event_t;
 
@@ -675,9 +778,18 @@ static void ble2mqtt_handle_event(event_t *event)
             event->ble_device_characteristic_value.mac,
             event->ble_device_characteristic_value.service,
             event->ble_device_characteristic_value.characteristic,
+            event->ble_device_characteristic_value.characteristic_handle,
             event->ble_device_characteristic_value.value,
             event->ble_device_characteristic_value.value_len);
         free(event->ble_device_characteristic_value.value);
+        break;
+    case EVENT_TYPE_BLE_DEVICE_DESCRIPTOR_VALUE:
+        ble_on_device_descriptor_value(
+            event->ble_device_descriptor_value.mac,
+            event->ble_device_descriptor_value.handle,
+            event->ble_device_descriptor_value.value,
+            event->ble_device_descriptor_value.value_len);
+        free(event->ble_device_descriptor_value.value);
         break;
     case EVENT_TYPE_BLE_MQTT_CONNECTED:
         ble_on_mqtt_connected_cb(event->mqtt_message.topic, event->mqtt_message.payload,
@@ -898,7 +1010,7 @@ static void _ble_on_device_services_discovered(mac_addr_t mac)
 }
 
 static void _ble_on_device_characteristic_value(mac_addr_t mac,
-    ble_uuid_t service, ble_uuid_t characteristic, uint8_t *value,
+    ble_uuid_t service, ble_uuid_t characteristic, uint16_t characteristic_handle, uint8_t *value,
     size_t value_len)
 {
     event_t *event = malloc(sizeof(*event));
@@ -912,6 +1024,8 @@ static void _ble_on_device_characteristic_value(mac_addr_t mac,
     event->ble_device_characteristic_value.value = malloc(value_len);
     memcpy(event->ble_device_characteristic_value.value, value, value_len);
     event->ble_device_characteristic_value.value_len = value_len;
+    event->ble_device_characteristic_value.characteristic_handle = characteristic_handle;
+    
 
     ESP_LOGD(TAG, "Queuing event BLE_DEVICE_CHARACTERISTIC_VALUE (" MAC_FMT ", "
         UUID_FMT ", %p, %u)", MAC_PARAM(mac), UUID_PARAM(characteristic), value,
@@ -919,6 +1033,32 @@ static void _ble_on_device_characteristic_value(mac_addr_t mac,
     xQueueSend(event_queue, &event, portMAX_DELAY);
 }
 
+static void _ble_on_device_descriptor_value(
+    ble_device_t *device, 
+    ble_service_t *service,
+    ble_characteristic_t *characteristic,
+    ble_descriptor_t *descriptor,
+    uint8_t *value,
+    size_t value_len)
+{
+    event_t *event = malloc(sizeof(*event));
+
+    event->type = EVENT_TYPE_BLE_DEVICE_DESCRIPTOR_VALUE;
+
+    memcpy(event->ble_device_descriptor_value.mac, device->mac, sizeof(mac_addr_t));
+
+    event->ble_device_descriptor_value.value = malloc(value_len);
+
+    memcpy(event->ble_device_descriptor_value.value, value, value_len);
+    event->ble_device_descriptor_value.value_len = value_len;
+
+    event->ble_device_descriptor_value.handle = descriptor->handle;
+
+    ESP_LOGI(TAG, "Queuing event BLE_DEVICE_DESCRIPTOR_VALUE (" MAC_FMT ", "
+        UUID_FMT ", %p, %u)", MAC_PARAM(device->mac), UUID_PARAM(descriptor->uuid), value,
+        value_len);
+    xQueueSend(event_queue, &event, portMAX_DELAY);
+}
 static void _ble_on_mqtt_connected_cb(const char *topic, const uint8_t *payload,
     size_t len, void *ctx)
 {
@@ -1001,6 +1141,8 @@ void app_main()
         _ble_on_device_services_discovered);
     ble_set_on_device_characteristic_value_cb(
         _ble_on_device_characteristic_value);
+    ble_set_on_device_descriptor_value_cb(
+        _ble_on_device_descriptor_value);
     ble_set_on_passkey_requested_cb(ble_on_passkey_requested);
 
     /* Init web server */
