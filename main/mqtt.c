@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <mqtt_client.h>
 #include <string.h>
+#include "esp_task_wdt.h"
 
 /* Constants */
 static const char *TAG = "MQTT";
@@ -214,8 +215,15 @@ int mqtt_publish(const char *topic, uint8_t *payload, size_t len, int qos,
 {
     if (is_connected)
     {
-        return esp_mqtt_client_publish(mqtt_handle, (char *)topic,
-            (char *)payload, len, qos, retained) < 0;
+        int code = esp_mqtt_client_publish(mqtt_handle, (char *)topic,
+            (char *)payload, len, qos, retained);
+
+        if(code >= 0){
+            // reset only on successful publish
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
+        }
+
+        return code < 0;
     }
 
     /* If we're currently not connected, queue publication */

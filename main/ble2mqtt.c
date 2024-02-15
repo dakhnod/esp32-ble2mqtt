@@ -21,6 +21,7 @@
 #include <freertos/task.h>
 #include <freertos/timers.h>
 #include <string.h>
+#include "esp_task_wdt.h"
 
 #define MAX_TOPIC_LEN 256
 static const char *TAG = "BLE2MQTT";
@@ -704,12 +705,15 @@ static int start_ble2mqtt_task(void)
     if (!(event_queue = xQueueCreate(10, sizeof(event_t *))))
         return -1;
 
+    TaskHandle_t taskHandle;
+
     if (xTaskCreatePinnedToCore(ble2mqtt_task, "ble2mqtt_task", 4096, NULL, 5,
-        NULL, 1) != pdPASS)
+        &taskHandle, 1) != pdPASS)
     {
         return -1;
     }
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(taskHandle));
 
     hb_timer = xTimerCreate("heartbeat", pdMS_TO_TICKS(60 * 1000), pdTRUE,
         NULL, heartbeat_timer_cb);
@@ -977,6 +981,13 @@ void app_main()
     /* Init web server */
     ESP_ERROR_CHECK(httpd_initialize());
     httpd_set_on_ota_completed_cb(_ota_on_completed);
+
+    const esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 5 * 60 * 1000, // 5 minutes
+        .idle_core_mask = 0b11,
+        .trigger_panic = false
+    };
+    ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_config));
 
     /* Start BLE2MQTT task */
     ESP_ERROR_CHECK(start_ble2mqtt_task());
